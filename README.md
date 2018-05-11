@@ -1,1 +1,1 @@
-# HPC_assignment_blislab
+# HPC_assignment
