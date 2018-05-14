@@ -1,8 +1,6 @@
-
-
-/* using openmp for around micro-kernel loop 
-Addin multithreading option in allocation of packing buffers in packB similar to packA 
-pack C like A and B*/
+// using openmp for around micro-kernel loop 
+//loop unrolling of matrix C
+//storing initial values of matrix C in registers
 
 #include <algorithm>
 #include <cmath>
@@ -13,12 +11,14 @@ pack C like A and B*/
 #include <omp.h>
 #include <time.h>
 
+
+//Broadwell (Tsubame architecture) 16x6
 #define GEMM_SIMD_ALIGN_SIZE 32   //step5/single/include/bl_config.h
-#define SGEMM_MC 264  
-#define SGEMM_NC 128
+#define SGEMM_MC 128  
+#define SGEMM_NC 4080
 #define SGEMM_KC 256
-#define SGEMM_MR 24
-#define SGEMM_NR 4
+#define SGEMM_MR 16
+#define SGEMM_NR 6
 
 typedef unsigned long long dim_t;  //include/bl_sgemm_kernel.h
 
@@ -88,7 +88,8 @@ inline void packB_kcxnc_d(int n, int k, float *XB, int ldXB, int offsetb, float 
 //--------------------------------------------------------------------------------------
 
 #if 1
-#include "micro_kernel.h"
+//#include "micro_kernel.h"
+#include "bl_sgemm_asm_16x6.h"
 #else
 void micro_kernel(int kc, float* A, float* B, float* C, dim_t ldc, aux_t* aux) {
   int nr = aux->n;
@@ -107,7 +108,7 @@ void micro_kernel(int kc, float* A, float* B, float* C, dim_t ldc, aux_t* aux) {
 void macro_kernel(int mc, int nc, int kc, float *packA, float *packB, float *C, int ldc) {
   aux_t aux;
   aux.b_next = packB;
-  bl_ic_nt = 16;
+  int bl_ic_nt = 16;
   char *str = getenv( "BLISLAB_IC_NT" );
   if ( str != NULL ) {
     bl_ic_nt = (int)strtol(str, NULL, 10);
@@ -137,7 +138,7 @@ void bl_sgemm(int m, int n, int k, float *XA, int lda, float *XB, int ldb, float
   }
 //Allocate packing buffers
   float * packA = bl_malloc_aligned(SGEMM_KC, (SGEMM_MC+1)*bl_ic_nt, sizeof(float));
-  float * packB = bl_malloc_aligned(SGEMM_KC, (SGEMM_NC+1)*bl_ic_nt, sizeof(float)); //****bl_ic_nt insert
+  float * packB = bl_malloc_aligned(SGEMM_KC, (SGEMM_NC+1)         , sizeof(float)); //****bl_ic_nt insert
 
   for (int jc=0; jc<n; jc+=SGEMM_NC) {           //5-th loop around micro-kernel  
     int nc = std::min(n-jc, SGEMM_NC);
@@ -146,9 +147,8 @@ void bl_sgemm(int m, int n, int k, float *XA, int lda, float *XB, int ldb, float
 
 #pragma omp parallel for num_threads(bl_ic_nt)
       for (int j=0; j<nc; j+=SGEMM_NR) {
-      int tid = omp_get_thread_num();        //added tid
       
-        packB_kcxnc_d(std::min(nc-j, SGEMM_NR), kc, &XB[pc], k, jc+j, &packB[tid*SGEMM_NC*kc+j*kc]); //change in &packB
+        packB_kcxnc_d(std::min(nc-j, SGEMM_NR), kc, &XB[pc], k, jc+j, &packB[j*kc]); 
       }
 #pragma omp parallel for num_threads(bl_ic_nt)   //3-rd loop around micro-kernel
       for (int ic=0; ic<m; ic+=SGEMM_MC) {
@@ -157,7 +157,7 @@ void bl_sgemm(int m, int n, int k, float *XA, int lda, float *XB, int ldb, float
         for (int i=0; i<mc; i+=SGEMM_MR) {
           packA_mcxkc_d(std::min(mc-i, SGEMM_MR), kc, &XA[pc*lda], m, ic+i, &packA[tid*SGEMM_MC*kc+i*kc]);
         }
-        macro_kernel(mc, nc, kc, packA+tid*SGEMM_MC*kc, packB+tid*SGEMM_NC*kc, &C[jc*ldc+ic], ldc); //change in packB //macro_kernel call
+        macro_kernel(mc, nc, kc, packA+tid*SGEMM_MC*kc, packB, &C[jc*ldc+ic], ldc); 
       }       //End 3.rd loop around micro-kernel
     }         //End 4.th loop around micro-kernel
   }           //End 5.th loop around micro-kernel
@@ -197,12 +197,61 @@ int main(int argc, char *argv[]) {
       B(p,j) = drand48();
     }
   }
+
+ 
   for (int j=0; j<n; j++) {
     for (int i=0; i<m; i++) {
       C_ref(i,j) = 0.0;
       C(i,j) = 0.0;
+      
     }
   }
+
+//minor change using pointers 
+/* float *cp;
+  for (int j=0; j<n; j++) {
+    cp = &C[j*ldc];             // point cp to top of the jth column
+    for (int i=0; i<m; i++) {
+      //C_ref(i,j) = 0.0;
+      //C(i,j) = 0.0;
+      *cp++ = 0.0;             // 
+    }
+  }
+*/
+//Loop unrolling with unrolling factor of 4
+/*  float *cp;
+  for (int j=0; j<n; j++) {
+    cp = &C[j*ldc];             // point cp to top of the jth column
+    for (int i=0; i<m; i+=4) {
+      //C_ref(i,j) = 0.0;
+      //C(i,j) = 0.0;
+      *(cp+0) = 0.0;
+      *(cp+1) = 0.0;
+      *(cp+2) = 0.0;
+      *(cp+3) = 0.0;
+      cp += 4;
+    }
+  }*/
+
+// storing matrix C in registers
+/*  float *cp;
+  for (int j=0; j<n; j++) {
+    cp = &C[j*ldc];             // point cp to top of the jth column
+    for (int i=0; i<m; i+=4) {
+      register double c0=0.0, c1=0.0, c2=0.0, c3=0.0, c4=0.0, c5=0.0; 
+      //C_ref(i,j) = 0.0;
+      //C(i,j) = 0.0;
+      *(cp+0) = c0;
+      *(cp+1) = c1;
+      *(cp+2) = c2;
+      *(cp+3) = c3;
+      *(cp+4) = c4;
+      *(cp+5) = c5;
+      cp += 6;
+    }
+  }
+*/
+
   for (int i=0; i<nrepeats; i++) {
     double bl_sgemm_beg = omp_get_wtime();
     bl_sgemm(m, n, k, A, lda, B, ldb, C, ldc);      //bl_sgemm call
@@ -232,7 +281,7 @@ int main(int argc, char *argv[]) {
     }
   }
   float flops = (m * n / (1000.0 * 1000.0 * 1000.0)) * (2 * k);
-  printf("%5d\t %5d\t %5d\t %5.2lf\t %5.2lf\n",
+  printf("%5d\t %5d\t %5d\t %5.2lf\t\t %5.2lf\n",
          m, n, k, flops / bl_sgemm_rectime, flops / ref_rectime);
   free(A);
   free(B);

@@ -1,4 +1,4 @@
-CC = gcc
+CC = icc
 CFLAGS = -O3 -fopenmp -mavx -fPIC -I.
 LDLIBS = -lpthread -lm -fopenmp -mkl=parallel -Werror -Wall -pedantic
 
